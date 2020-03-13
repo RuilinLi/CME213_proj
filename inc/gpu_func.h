@@ -46,7 +46,7 @@ int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
            int N, int K);
 
 __global__
-void gpu_GEMM(double* __restrict__ dA, double* __restrict__ dB,
+void gpu_GEMM(const double* __restrict__ dA, const double* __restrict__ dB,
               double* __restrict__ dC, double alpha, double beta,
               int M, int N, int K);
 
@@ -99,5 +99,12 @@ void backward_pass(raw_params &d_params, raw_cache &d_cache,
 
 
 void free_all_CUDA(raw_params &d_params, raw_cache &d_cache, raw_grad &d_grad);
+
+void gradient_descent(raw_grad &d_grad, 
+                      raw_params &d_params, 
+                      double learning_rate,
+                      int input_dim,
+                      int h1,
+                      int output_dim);
 
 #endif

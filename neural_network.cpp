@@ -333,7 +333,12 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     // MPI_Bcast(nn.b[0].memptr(), nn.H[1], MPI_DOUBLE, 0, MPI_COMM_WORLD);
     // MPI_Bcast(nn.b[1].memptr(), nn.H[2], MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // Important, make sure the number of images is an integer multiple of batch_size
+    // Copy initial parameters to device
+    cudaMemcpy(d_params.W1, nn.W[0].memptr(), sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_params.W2, nn.W[1].memptr(), sizeof(double) * nn.H[1] * nn.H[2], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_params.b1, nn.b[0].memptr(), sizeof(double) * nn.H[1], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_params.b2, nn.b[1].memptr(), sizeof(double) * nn.H[2], cudaMemcpyHostToDevice);
+
 
     /* HINT: You can obtain a raw pointer to the memory used by Armadillo Matrices
        for storing elements in a column major way. Or you can allocate your own array
@@ -375,11 +380,11 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             MPI_Scatterv(y.colptr(starting_location), sendcounts_y, displs_y, 
                           MPI_DOUBLE, y_local, batch_size_node*nn.H[2], MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-            // Send the weights and the data to device
-            cudaMemcpy(d_params.W1, nn.W[0].memptr(), sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyHostToDevice);
-            cudaMemcpy(d_params.W2, nn.W[1].memptr(), sizeof(double) * nn.H[1] * nn.H[2], cudaMemcpyHostToDevice);
-            cudaMemcpy(d_params.b1, nn.b[0].memptr(), sizeof(double) * nn.H[1], cudaMemcpyHostToDevice);
-            cudaMemcpy(d_params.b2, nn.b[1].memptr(), sizeof(double) * nn.H[2], cudaMemcpyHostToDevice);
+            // // Send the weights and the data to device
+            // cudaMemcpy(d_params.W1, nn.W[0].memptr(), sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyHostToDevice);
+            // cudaMemcpy(d_params.W2, nn.W[1].memptr(), sizeof(double) * nn.H[1] * nn.H[2], cudaMemcpyHostToDevice);
+            // cudaMemcpy(d_params.b1, nn.b[0].memptr(), sizeof(double) * nn.H[1], cudaMemcpyHostToDevice);
+            // cudaMemcpy(d_params.b2, nn.b[1].memptr(), sizeof(double) * nn.H[2], cudaMemcpyHostToDevice);
 
             send_data_to_device(X_local, y_local, d_cache, batch_size_node, nn.H[0], nn.H[2]);
             forward_pass(d_params, d_cache, nn.H[0], nn.H[1], nn.H[2], batch_size_node);
@@ -398,13 +403,20 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             MPI_Allreduce(MPI_IN_PLACE, h_grad.db[0].memptr(), nn.H[1], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
             MPI_Allreduce(MPI_IN_PLACE, h_grad.db[1].memptr(), nn.H[2], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
             
-            // Do gradient descent
-            nn.W[0] -= learning_rate*h_grad.dW[0];
-            nn.W[1] -= learning_rate*h_grad.dW[1];
-            nn.b[0] -= learning_rate*h_grad.db[0];
-            nn.b[1] -= learning_rate*h_grad.db[1];
+            // // Do gradient descent
+            // nn.W[0] -= learning_rate*h_grad.dW[0];
+            // nn.W[1] -= learning_rate*h_grad.dW[1];
+            // nn.b[0] -= learning_rate*h_grad.db[0];
+            // nn.b[1] -= learning_rate*h_grad.db[1];
 
+            // Seems like gradient descent should be done on the GPUs, so we do this
+            // Send the gradient from host to GPU
+            cudaMemcpy(d_grad.dW1, h_grad.dW[0].memptr(), sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyHostToDevice);
+            cudaMemcpy(d_grad.dW2, h_grad.dW[1].memptr(), sizeof(double) * nn.H[2] * nn.H[1], cudaMemcpyHostToDevice);
+            cudaMemcpy(d_grad.db1, h_grad.db[0].memptr(), sizeof(double) * nn.H[1], cudaMemcpyHostToDevice);
+            cudaMemcpy(d_grad.db2, h_grad.db[1].memptr(),sizeof(double) * nn.H[2], cudaMemcpyHostToDevice);
 
+            gradient_descent(d_grad, d_params, learning_rate, nn.H[0], nn.H[1], nn.H[2]);
 
             if(print_every <= 0) {
                 print_flag = batch == 0;
@@ -420,6 +432,12 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             iter++;
         }
     }
+    // Copy the result back to host 
+    cudaMemcpy(nn.W[0].memptr(), d_params.W1, sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyDeviceToHost);
+    cudaMemcpy(nn.W[1].memptr(), d_params.W2, sizeof(double) * nn.H[1] * nn.H[2], cudaMemcpyDeviceToHost);
+    cudaMemcpy(nn.b[0].memptr(), d_params.b1, sizeof(double) * nn.H[1], cudaMemcpyDeviceToHost);
+    cudaMemcpy(nn.b[1].memptr(), d_params.b2, sizeof(double) * nn.H[2], cudaMemcpyDeviceToHost);
+
     free(X_local);
     free(y_local);
     free(sendcounts_X);

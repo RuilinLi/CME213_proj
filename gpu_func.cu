@@ -103,7 +103,7 @@ int myGEMM(double* __restrict__ A, double* __restrict__ B,
 
 // This is indeed faster
 __global__
-void gpu_GEMM(double* __restrict__ dA, double* __restrict__ dB,
+void gpu_GEMM(const double* __restrict__ dA, const double* __restrict__ dB,
                double* __restrict__ dC, double alpha, double beta,
                int M, int N, int K)
 {
@@ -141,7 +141,7 @@ void gpu_GEMM(double* __restrict__ dA, double* __restrict__ dB,
 // This kernel add b to each column of Z in place
 // Z is M by N, b has length M
 __global__
-void gpu_add_col(double *Z, double *b, int M, int N){
+void gpu_add_col(double* __restrict__ Z, const double* __restrict__ b, int M, int N){
     int indx = blockIdx.x*blockDim.x + threadIdx.x;
     int indy = blockIdx.y*blockDim.y + threadIdx.y;
     if (indx < N && indy < M){
@@ -149,7 +149,7 @@ void gpu_add_col(double *Z, double *b, int M, int N){
     }
 }
 
-int add_col(double *Z, double *b, int M, int N)
+int add_col(double* __restrict__ Z, const double* __restrict__ b, int M, int N)
 {
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
@@ -164,7 +164,7 @@ int add_col(double *Z, double *b, int M, int N)
 // and save it to the second
 // Z has dimension M by N
 __global__
-void sigmoid_gpu(double *Z, double* a, int M, int N)
+void sigmoid_gpu(const double* __restrict__ Z, double* __restrict__ a, int M, int N)
 {
     int indx = blockIdx.x*blockDim.x + threadIdx.x;
     int indy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -174,7 +174,7 @@ void sigmoid_gpu(double *Z, double* a, int M, int N)
 
 }
 
-int sigmoid(double *Z, double* a, int M, int N)
+int sigmoid(const double* __restrict__ Z, double* __restrict__ a, int M, int N)
 {
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
@@ -188,7 +188,7 @@ int sigmoid(double *Z, double* a, int M, int N)
 // Function that computes softmax, assuming the output dimension
 // is small
 __global__
-void softmax_gpu(double *Z, double *a, int M, int N){
+void softmax_gpu(const double* __restrict__ Z, double* __restrict__ a, int M, int N){
     int indx = blockIdx.x*blockDim.x + threadIdx.x;
     int indy = blockIdx.y*blockDim.y + threadIdx.y;
     if (indx < N && indy < M){
@@ -200,7 +200,7 @@ void softmax_gpu(double *Z, double *a, int M, int N){
     }
 }
 
-int softmax(double *Z, double *a, int M, int N){
+int softmax(const double* __restrict__ Z, double* __restrict__ a, int M, int N){
     dim3 threads(64, 2);
     int num_block_x = (N + 64 - 1)/64;
     int num_block_y = (M + 2 - 1)/2;
@@ -213,7 +213,7 @@ int softmax(double *Z, double *a, int M, int N){
 // Kernel that compute a * A + b * B and save it to C,
 // a, b are scalars. A,B, C are M by N,
 __global__
-void matadd_gpu(double *A, double *B, double *C, int M, int N, double a, double b)
+void matadd_gpu(const double* __restrict__ A, const double* __restrict__ B, double* __restrict__ C, int M, int N, double a, double b)
 {    
     int indx = blockIdx.x*blockDim.x + threadIdx.x;
     int indy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -222,7 +222,7 @@ void matadd_gpu(double *A, double *B, double *C, int M, int N, double a, double 
     }
 }
 
-int matadd(double *A, double *B, double *C, int M, int N, double a, double b)
+int matadd(const double* __restrict__ A, const double* __restrict__ B, double* __restrict__ C, int M, int N, double a, double b)
 {
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
@@ -238,7 +238,7 @@ int matadd(double *A, double *B, double *C, int M, int N, double a, double b)
 // This kernel transpose the matrix A and save it to
 // At, A is M by N, for now do it naively
 __global__
-void transpose_gpu(double *A, double *At, int M, int N){
+void transpose_gpu(const double* __restrict__ A, double* __restrict__ At, int M, int N){
     int indx = blockIdx.x*blockDim.x + threadIdx.x;
     int indy = blockIdx.y*blockDim.y + threadIdx.y;
     if(indx < N && indy < M){
@@ -246,7 +246,7 @@ void transpose_gpu(double *A, double *At, int M, int N){
     }
 }
 
-int transpose(double *A, double *At, int M, int N){
+int transpose(const double* __restrict__ A, double* __restrict__ At, int M, int N){
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
     int num_block_y = (M + BLOCK_SIZE - 1)/BLOCK_SIZE;
@@ -259,7 +259,7 @@ int transpose(double *A, double *At, int M, int N){
 // This kernel sum the rows of the matrix A and store 
 // it to the entries of b. A is M by N
 __global__
-void naive_reduce_sum(double *A, double *b, int M, int N)
+void naive_reduce_sum(const double* __restrict__ A, double* __restrict__ b, int M, int N)
 {
     int idx = blockIdx.x*blockDim.x + threadIdx.x;
     if (idx < M){
@@ -271,7 +271,7 @@ void naive_reduce_sum(double *A, double *b, int M, int N)
     }
 }
 
-int naive_sum(double *A, double *b, int M, int N)
+int naive_sum(const double* __restrict__ A, double* __restrict__ b, int M, int N)
 {
     int thread = 1;
     int block = M;
@@ -282,7 +282,7 @@ int naive_sum(double *A, double *b, int M, int N)
 // This is a specialized kernel to compute dCE/dz1
 // dz1 has dimension M by N
 __global__
-void get_dz1_gpu(double *dz1, double *a, int M, int N)
+void get_dz1_gpu(double* __restrict__ dz1, const double* __restrict__ a, int M, int N)
 {
     int indx = blockIdx.x*blockDim.x + threadIdx.x;
     int indy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -291,7 +291,7 @@ void get_dz1_gpu(double *dz1, double *a, int M, int N)
     }
 }
 
-int get_dz1(double *dz1, double *a, int M, int N){
+int get_dz1(double* __restrict__ dz1, const double* __restrict__ a, int M, int N){
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
     int num_block_y = (M + BLOCK_SIZE - 1)/BLOCK_SIZE;
@@ -390,6 +390,20 @@ void backward_pass(raw_params &d_params,
     matadd(d_grad.dW1, d_params.W1, d_grad.dW1, h1, input_dim, 1.0, reg/(double)num_procs);
     matadd(d_grad.dW2, d_params.W2, d_grad.dW2, output_dim, h1, 1.0, reg/(double)num_procs);
 }
+
+void gradient_descent(raw_grad &d_grad, 
+                      raw_params &d_params, 
+                      double learning_rate,
+                      int input_dim,
+                      int h1,
+                      int output_dim)
+{
+    matadd(d_params.W1, d_grad.dW1, d_params.W1, h1, input_dim, 1.0, -learning_rate);
+    matadd(d_params.W2, d_grad.dW2, d_params.W2, output_dim, h1, 1.0, -learning_rate);
+    matadd(d_params.b1, d_grad.db1, d_params.b1, h1, 1, 1.0, -learning_rate);
+    matadd(d_params.b2, d_grad.db2, d_params.b2, output_dim, 1, 1.0, -learning_rate);
+}
+
 
 
 
