@@ -301,14 +301,23 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
 
     // My code
     // Allocate host memory on CPU
-    struct grads h_grad; // host grad
+    struct raw_grad h_grad; // host grad
     int max_num_img_per_node = (batch_size + num_procs-1)/num_procs;
-    double *X_local = (double*)malloc(sizeof(double)*max_num_img_per_node*nn.H[0]);
-    double *y_local = (double*)malloc(sizeof(double)*max_num_img_per_node*nn.H[2]);
-    for(int layer = 0; layer < nn.H.size()-1; layer++){
-        h_grad.dW.emplace_back(nn.H[layer+1], nn.H[layer]);
-        h_grad.db.emplace_back(nn.H[layer+1]);
-    }
+    // double *X_local = (double*)malloc(sizeof(double)*max_num_img_per_node*nn.H[0]);
+    // double *y_local = (double*)malloc(sizeof(double)*max_num_img_per_node*nn.H[2]);
+    // for(int layer = 0; layer < nn.H.size()-1; layer++){
+    //     h_grad.dW.emplace_back(nn.H[layer+1], nn.H[layer]);
+    //     h_grad.db.emplace_back(nn.H[layer+1]);
+    // }
+    double *X_local;
+    double *y_local;
+    cudaHostAlloc((void**)&X_local, sizeof(double)*max_num_img_per_node*nn.H[0],cudaHostAllocPortable);
+    cudaHostAlloc((void**)&y_local, sizeof(double)*max_num_img_per_node*nn.H[2],cudaHostAllocPortable);
+
+    cudaHostAlloc((void**)&h_grad.dW1, sizeof(double)*nn.H[0]*nn.H[1],cudaHostAllocPortable);
+    cudaHostAlloc((void**)&h_grad.dW2, sizeof(double)*nn.H[1]*nn.H[2],cudaHostAllocPortable);
+    cudaHostAlloc((void**)&h_grad.db1, sizeof(double)*nn.H[1],cudaHostAllocPortable);
+    cudaHostAlloc((void**)&h_grad.db2, sizeof(double)*nn.H[2],cudaHostAllocPortable);
 
     raw_params d_params;
     raw_cache d_cache;
@@ -348,6 +357,10 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     /* iter is a variable used to manage debugging. It increments in the inner loop
        and therefore goes from 0 to epochs*num_batches */
     int iter = 0;
+    cudaStream_t mystream[4];
+    for(int si =0; si<4; si++){
+        cudaStreamCreate(&mystream[si]);
+    }
 
     for(int epoch = 0; epoch < epochs; ++epoch) {
         int num_batches = (N + batch_size - 1)/batch_size;
@@ -377,46 +390,40 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
             MPI_Scatterv(X.colptr(starting_location), sendcounts_X, displs_X, 
                           MPI_DOUBLE, X_local, batch_size_node*nn.H[0], MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
+            send_data_to_device(X_local, d_cache.X, batch_size_node, nn.H[0], mystream[0]);
+
+            forward_pass(d_params, d_cache, nn.H[0], nn.H[1], nn.H[2], batch_size_node, mystream);
+
             MPI_Scatterv(y.colptr(starting_location), sendcounts_y, displs_y, 
                           MPI_DOUBLE, y_local, batch_size_node*nn.H[2], MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
-            // // Send the weights and the data to device
-            // cudaMemcpy(d_params.W1, nn.W[0].memptr(), sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyHostToDevice);
-            // cudaMemcpy(d_params.W2, nn.W[1].memptr(), sizeof(double) * nn.H[1] * nn.H[2], cudaMemcpyHostToDevice);
-            // cudaMemcpy(d_params.b1, nn.b[0].memptr(), sizeof(double) * nn.H[1], cudaMemcpyHostToDevice);
-            // cudaMemcpy(d_params.b2, nn.b[1].memptr(), sizeof(double) * nn.H[2], cudaMemcpyHostToDevice);
-
-            send_data_to_device(X_local, y_local, d_cache, batch_size_node, nn.H[0], nn.H[2]);
-            forward_pass(d_params, d_cache, nn.H[0], nn.H[1], nn.H[2], batch_size_node);
-            backward_pass(d_params,d_cache,d_grad, d_bp,nn.H[0], nn.H[1],nn.H[2], reg, batch_size_node, current_batch_size, num_procs);
+            send_data_to_device(y_local, d_cache.y, batch_size_node, nn.H[2], mystream[1]);
+            cudaDeviceSynchronize();
+            backward_pass(d_params,d_cache,d_grad, d_bp,nn.H[0], nn.H[1],nn.H[2], reg, batch_size_node, current_batch_size, num_procs, mystream);
 
             
             // Send the gradient from GPU to host
-            cudaMemcpy(h_grad.dW[0].memptr(), d_grad.dW1, sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_grad.dW[1].memptr(), d_grad.dW2, sizeof(double) * nn.H[2] * nn.H[1], cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_grad.db[0].memptr(), d_grad.db1, sizeof(double) * nn.H[1], cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_grad.db[1].memptr(), d_grad.db2, sizeof(double) * nn.H[2], cudaMemcpyDeviceToHost);
+            cudaMemcpyAsync(h_grad.dW1, d_grad.dW1, sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyDeviceToHost, mystream[0]);
+            cudaMemcpyAsync(h_grad.dW2, d_grad.dW2, sizeof(double) * nn.H[2] * nn.H[1], cudaMemcpyDeviceToHost, mystream[1]);
+            cudaMemcpyAsync(h_grad.db1, d_grad.db1, sizeof(double) * nn.H[1], cudaMemcpyDeviceToHost,  mystream[2]);
+            cudaMemcpyAsync(h_grad.db2, d_grad.db2, sizeof(double) * nn.H[2], cudaMemcpyDeviceToHost, mystream[3]);
 
-            // Reduce all
-            MPI_Allreduce(MPI_IN_PLACE, h_grad.dW[0].memptr(), nn.H[0]*nn.H[1], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            MPI_Allreduce(MPI_IN_PLACE, h_grad.dW[1].memptr(), nn.H[1]*nn.H[2], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            MPI_Allreduce(MPI_IN_PLACE, h_grad.db[0].memptr(), nn.H[1], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            MPI_Allreduce(MPI_IN_PLACE, h_grad.db[1].memptr(), nn.H[2], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-            
-            // // Do gradient descent
-            // nn.W[0] -= learning_rate*h_grad.dW[0];
-            // nn.W[1] -= learning_rate*h_grad.dW[1];
-            // nn.b[0] -= learning_rate*h_grad.db[0];
-            // nn.b[1] -= learning_rate*h_grad.db[1];
+            cudaDeviceSynchronize();
+            MPI_Allreduce(MPI_IN_PLACE, h_grad.dW1, nn.H[0]*nn.H[1], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);  
+            cudaMemcpyAsync(d_grad.dW1, h_grad.dW1, sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyHostToDevice, mystream[0]);
+
+            MPI_Allreduce(MPI_IN_PLACE, h_grad.dW2, nn.H[1]*nn.H[2], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            cudaMemcpyAsync(d_grad.dW2, h_grad.dW2, sizeof(double) * nn.H[2] * nn.H[1], cudaMemcpyHostToDevice, mystream[1]);
+
+            MPI_Allreduce(MPI_IN_PLACE, h_grad.db1, nn.H[1], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            cudaMemcpyAsync(d_grad.db1, h_grad.db1, sizeof(double) * nn.H[1], cudaMemcpyHostToDevice,mystream[2]);
+
+            MPI_Allreduce(MPI_IN_PLACE, h_grad.db2, nn.H[2], MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            cudaMemcpyAsync(d_grad.db2, h_grad.db2, sizeof(double) * nn.H[2], cudaMemcpyHostToDevice, mystream[3]);
 
             // Seems like gradient descent should be done on the GPUs, so we do this
             // Send the gradient from host to GPU
-            cudaMemcpy(d_grad.dW1, h_grad.dW[0].memptr(), sizeof(double) * nn.H[0] * nn.H[1], cudaMemcpyHostToDevice);
-            cudaMemcpy(d_grad.dW2, h_grad.dW[1].memptr(), sizeof(double) * nn.H[2] * nn.H[1], cudaMemcpyHostToDevice);
-            cudaMemcpy(d_grad.db1, h_grad.db[0].memptr(), sizeof(double) * nn.H[1], cudaMemcpyHostToDevice);
-            cudaMemcpy(d_grad.db2, h_grad.db[1].memptr(),sizeof(double) * nn.H[2], cudaMemcpyHostToDevice);
 
-            gradient_descent(d_grad, d_params, learning_rate, nn.H[0], nn.H[1], nn.H[2]);
+            gradient_descent(d_grad, d_params, learning_rate, nn.H[0], nn.H[1], nn.H[2], mystream);
 
             if(print_every <= 0) {
                 print_flag = batch == 0;
@@ -438,8 +445,15 @@ void parallel_train(NeuralNetwork& nn, const arma::mat& X, const arma::mat& y,
     cudaMemcpy(nn.b[0].memptr(), d_params.b1, sizeof(double) * nn.H[1], cudaMemcpyDeviceToHost);
     cudaMemcpy(nn.b[1].memptr(), d_params.b2, sizeof(double) * nn.H[2], cudaMemcpyDeviceToHost);
 
-    free(X_local);
-    free(y_local);
+    cudaFreeHost(X_local);
+    cudaFreeHost(y_local);
+    cudaFreeHost(h_grad.dW1);
+    cudaFreeHost(h_grad.dW2);
+    cudaFreeHost(h_grad.db1);
+    cudaFreeHost(h_grad.db2);
+    for (int si = 0; si< 4;++si){
+        cudaStreamDestroy(mystream[si]);
+    }
     free(sendcounts_X);
     free(sendcounts_y);
     free(displs_X);

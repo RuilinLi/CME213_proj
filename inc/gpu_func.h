@@ -43,7 +43,7 @@ inline double stop_timer(event_pair* p) {
 int useless_gpu_add_one(int t);
 
 int myGEMM(double* A, double* B, double* C, double* alpha, double* beta, int M,
-           int N, int K);
+           int N, int K, cudaStream_t stream=0);
 
 __global__
 void gpu_GEMM(const double* __restrict__ dA, const double* __restrict__ dB,
@@ -84,18 +84,27 @@ typedef struct raw_bp{
 void allocate_device_memory(raw_params &d_params, raw_cache &d_cache, raw_grad &d_grad,
                             raw_bp &d_bp, const std::vector<int>& H, int batch_size_node);
 
-void send_data_to_device(const double *X_local, 
-                         const double *y_local, 
-                         raw_cache &d_cache, 
-                         int batch_size_node, 
-                         int input_dim, 
-                         int output_dim);
+// void send_data_to_device(const double *X_local, 
+//                          const double *y_local, 
+//                          raw_cache &d_cache, 
+//                          int batch_size_node, 
+//                          int input_dim, 
+//                          int output_dim,
+//                          cudaStream_t mystream[]);
+
+void send_data_to_device(const double *src, 
+    double *dest, 
+    int batch_size_node, 
+    int dim,
+    cudaStream_t stream);
 
 void forward_pass(raw_params &d_params, raw_cache &d_cache, 
-                  int input_dim, int h1, int output_dim, int size);
+                  int input_dim, int h1, int output_dim, int size, cudaStream_t mystream[]);
 
 void backward_pass(raw_params &d_params, raw_cache &d_cache,
-                   raw_grad &d_grad, raw_bp &d_bp, int input_dim, int h1, int output_dim, double reg, int size, int batch_size, int num_procs);
+                   raw_grad &d_grad, raw_bp &d_bp, int input_dim, int h1, 
+                   int output_dim, double reg, int size, int batch_size, 
+                   int num_procs,cudaStream_t mystream[]);
 
 
 void free_all_CUDA(raw_params &d_params, raw_cache &d_cache, raw_grad &d_grad);
@@ -105,6 +114,7 @@ void gradient_descent(raw_grad &d_grad,
                       double learning_rate,
                       int input_dim,
                       int h1,
-                      int output_dim);
+                      int output_dim,
+                      cudaStream_t mystream[]);
 
 #endif

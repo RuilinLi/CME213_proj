@@ -52,7 +52,7 @@ Routine to perform an in-place GEMM operation, i.e., C := alpha*A*B + beta*C
 // }
 
 // __global__
-// void gpu_GEMM(double* __restrict__ dA, double* __restrict__ dB,
+// void gpu_GEMM(const double* __restrict__ dA, const double* __restrict__ dB,
 //               double* __restrict__ dC, double alpha, double beta,
 //               int M, int N, int K)
 // {
@@ -83,55 +83,71 @@ Routine to perform an in-place GEMM operation, i.e., C := alpha*A*B + beta*C
 //     }
 // }
 
-
 // Second implementation 
 /*
 Routine to perform an in-place GEMM operation, i.e., C := alpha*A*B + beta*C
 */
 int myGEMM(double* __restrict__ A, double* __restrict__ B,
     double* __restrict__ C, double* alpha, double* beta,
-    int M, int N, int K) {
+    int M, int N, int K, cudaStream_t stream) {
     /* TODO: Write an efficient GEMM implementation on GPU */
     dim3 threads(16, 4);
     int num_block_x = (N + 16 - 1)/16;
-    int num_block_y = (M + 64 - 1)/64;
+    int num_block_y = (M + 64 - 1)/64; // product of dimx and dimy
     dim3 blocks(num_block_x, num_block_y);
-
-    gpu_GEMM<<<blocks, threads>>>(A, B, C, *alpha, *beta, M, N, K);
+    gpu_GEMM<<<blocks, threads,0, stream>>>(A, B, C, *alpha, *beta, M, N, K);
     return 0;
 }
 
 // This is indeed faster
-__global__
-void gpu_GEMM(const double* __restrict__ dA, const double* __restrict__ dB,
+__global__ void 
+gpu_GEMM(const double* __restrict__ dA, const double* __restrict__ dB,
                double* __restrict__ dC, double alpha, double beta,
                int M, int N, int K)
 {
-    int col = blockIdx.x*16;
-    int row = blockIdx.y*64;
-    int Cx = blockIdx.x*16 + threadIdx.x;
-    int num_step = (K + 4 - 1)/4;
-    double a[4];
-    int row_offset = threadIdx.x+16*threadIdx.y;
-    double C_val[16];
-    for(int k = 0; k < 16; ++k){
+
+    constexpr int shared_x = 16; // same as blockdim.x
+    constexpr int shared_y = 4; // same as a size and blockdim.y
+    int sub_x =  shared_x;
+    int sub_y = blockDim.x*blockDim.y;
+
+    int col = blockIdx.x*sub_x;
+    int row = blockIdx.y*sub_y;
+    int Cx = blockIdx.x*sub_x + threadIdx.x;
+    int num_step = (K + shared_y - 1)/shared_y;
+    double a[shared_y];
+    int row_offset = threadIdx.x+blockDim.x*threadIdx.y;
+    double C_val[shared_x];
+    for(int k = 0; k < shared_x; ++k){
         C_val[k] = 0.0;
     }
+    __shared__ double Bs[shared_y*shared_x];
     for (int i  = 0; i < num_step; ++i){
-        __shared__ double Bs[4*16];
-        Bs[threadIdx.x*4+threadIdx.y] = (Cx < N && 4*i+threadIdx.y<K)?dB[Cx*K+4*i+threadIdx.y]:0.0;
-        a[0] = (4*i<K && row+row_offset<M)?dA[(4*i)*M+row+row_offset]:0.0;
-        a[1] = (4*i+1<K && row+row_offset<M)?dA[(4*i+1)*M+row+row_offset]:0.0;
-        a[2] = (4*i+2<K && row+row_offset<M)?dA[(4*i+2)*M+row+row_offset]:0.0;
-        a[3] = (4*i+3<K && row+row_offset<M)?dA[(4*i+3)*M+row+row_offset]:0.0;
+        //Bs[threadIdx.x*shared_y+threadIdx.y] = (Cx < N && shared_y*i+threadIdx.y<K)?dB[Cx*K+shared_y*i+threadIdx.y]:0.0;
+        // Make Bs row major
+        Bs[threadIdx.x+threadIdx.y*shared_x] = (Cx < N && shared_y*i+threadIdx.y<K)?dB[Cx*K+shared_y*i+threadIdx.y]:0.0;
 
-        __syncthreads();
-        for (int k = 0; k < 16; ++k){
-            C_val[k] += a[0]*Bs[k*4] + a[1]*Bs[k*4+1] +a[2]*Bs[k*4+2] +a[3]*Bs[k*4+3];
+        for (int j = 0; j < shared_y; ++j){
+            a[j] = (shared_y*i+j<K && row+row_offset<M)?dA[(shared_y*i+j)*M+row+row_offset]:0.0;
         }
         __syncthreads();
+        // a[0] = (4*i<K && row+row_offset<M)?dA[(4*i)*M+row+row_offset]:0.0;
+        // a[1] = (4*i+1<K && row+row_offset<M)?dA[(4*i+1)*M+row+row_offset]:0.0;
+        // a[2] = (4*i+2<K && row+row_offset<M)?dA[(4*i+2)*M+row+row_offset]:0.0;
+        // a[3] = (4*i+3<K && row+row_offset<M)?dA[(4*i+3)*M+row+row_offset]:0.0;
+
+        for (int k = 0; k < shared_x; ++k){
+            //C_val[k] += a[0]*Bs[k*4] + a[1]*Bs[k*4+1] +a[2]*Bs[k*4+2] +a[3]*Bs[k*4+3];
+            for  (int j = 0; j< shared_y; ++j){
+                //C_val[k] += a[j]*Bs[k*shared_y + j];
+                // Make  Bs row major
+                C_val[k] += a[j]*Bs[k+ j*shared_x];
+            }
+        }
+
+        __syncthreads();
     }
-    for (int k = 0; k < 16; ++k){
+    for (int k = 0; k < shared_x; ++k){
         if( col+k < N && row+row_offset <M){
             dC[(col+k)*M+row+row_offset] = alpha*C_val[k] + beta*dC[(col+k)*M+row+row_offset];
         }
@@ -149,14 +165,14 @@ void gpu_add_col(double* __restrict__ Z, const double* __restrict__ b, int M, in
     }
 }
 
-int add_col(double* __restrict__ Z, const double* __restrict__ b, int M, int N)
+int add_col(double* __restrict__ Z, const double* __restrict__ b, int M, int N, cudaStream_t stream=0)
 {
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
     int num_block_y = (M + BLOCK_SIZE - 1)/BLOCK_SIZE;
     dim3 blocks(num_block_x, num_block_y);
 
-    gpu_add_col<<<blocks, threads>>>(Z, b, M, N);
+    gpu_add_col<<<blocks, threads, 0, stream>>>(Z, b, M, N);
     return 0;
 }
 
@@ -174,14 +190,14 @@ void sigmoid_gpu(const double* __restrict__ Z, double* __restrict__ a, int M, in
 
 }
 
-int sigmoid(const double* __restrict__ Z, double* __restrict__ a, int M, int N)
+int sigmoid(const double* __restrict__ Z, double* __restrict__ a, int M, int N,cudaStream_t stream=0)
 {
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
     int num_block_y = (M + BLOCK_SIZE - 1)/BLOCK_SIZE;
     dim3 blocks(num_block_x, num_block_y);
 
-    sigmoid_gpu<<<blocks, threads>>>(Z, a, M, N);
+    sigmoid_gpu<<<blocks, threads,0,stream>>>(Z, a, M, N);
     return 0;
 }
 
@@ -200,12 +216,12 @@ void softmax_gpu(const double* __restrict__ Z, double* __restrict__ a, int M, in
     }
 }
 
-int softmax(const double* __restrict__ Z, double* __restrict__ a, int M, int N){
+int softmax(const double* __restrict__ Z, double* __restrict__ a, int M, int N,cudaStream_t stream=0){
     dim3 threads(64, 2);
     int num_block_x = (N + 64 - 1)/64;
     int num_block_y = (M + 2 - 1)/2;
     dim3 blocks(num_block_x, num_block_y);
-    softmax_gpu<<<blocks, threads>>>(Z, a, M, N);
+    softmax_gpu<<<blocks, threads,0,stream>>>(Z, a, M, N);
     return 0;
 }
 
@@ -222,14 +238,14 @@ void matadd_gpu(const double* __restrict__ A, const double* __restrict__ B, doub
     }
 }
 
-int matadd(const double* __restrict__ A, const double* __restrict__ B, double* __restrict__ C, int M, int N, double a, double b)
+int matadd(const double* __restrict__ A, const double* __restrict__ B, double* __restrict__ C, int M, int N, double a, double b, cudaStream_t stream=0)
 {
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
     int num_block_y = (M + BLOCK_SIZE - 1)/BLOCK_SIZE;
     dim3 blocks(num_block_x, num_block_y);
 
-    matadd_gpu<<<blocks, threads>>>(A, B, C, M, N, a, b);
+    matadd_gpu<<<blocks, threads,0,stream>>>(A, B, C, M, N, a, b);
     return 0;
 
 }
@@ -246,13 +262,13 @@ void transpose_gpu(const double* __restrict__ A, double* __restrict__ At, int M,
     }
 }
 
-int transpose(const double* __restrict__ A, double* __restrict__ At, int M, int N){
+int transpose(const double* __restrict__ A, double* __restrict__ At, int M, int N,cudaStream_t stream=0){
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
     int num_block_y = (M + BLOCK_SIZE - 1)/BLOCK_SIZE;
     dim3 blocks(num_block_x, num_block_y);
 
-    transpose_gpu<<<blocks, threads>>>(A, At, M, N);
+    transpose_gpu<<<blocks, threads,0,stream>>>(A, At, M, N);
     return 0;
 }
 
@@ -271,11 +287,11 @@ void naive_reduce_sum(const double* __restrict__ A, double* __restrict__ b, int 
     }
 }
 
-int naive_sum(const double* __restrict__ A, double* __restrict__ b, int M, int N)
+int naive_sum(const double* __restrict__ A, double* __restrict__ b, int M, int N,cudaStream_t stream=0)
 {
     int thread = 1;
     int block = M;
-    naive_reduce_sum<<<block, thread>>>(A, b, M, N);
+    naive_reduce_sum<<<block, thread,0,stream>>>(A, b, M, N);
     return 0;
 }
 
@@ -291,12 +307,12 @@ void get_dz1_gpu(double* __restrict__ dz1, const double* __restrict__ a, int M, 
     }
 }
 
-int get_dz1(double* __restrict__ dz1, const double* __restrict__ a, int M, int N){
+int get_dz1(double* __restrict__ dz1, const double* __restrict__ a, int M, int N,cudaStream_t stream=0){
     dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
     int num_block_x = (N + BLOCK_SIZE - 1)/BLOCK_SIZE;
     int num_block_y = (M + BLOCK_SIZE - 1)/BLOCK_SIZE;
     dim3 blocks(num_block_x, num_block_y);
-    get_dz1_gpu<<<blocks, threads>>>(dz1, a, M, N);
+    get_dz1_gpu<<<blocks, threads,0,stream>>>(dz1, a, M, N);
     return 0;
 }
 
@@ -335,29 +351,43 @@ void allocate_device_memory(raw_params &d_params,
 }
 
 
-void send_data_to_device(const double *X_local, 
-                         const double *y_local, 
-                         raw_cache &d_cache, 
-                         int batch_size_node, 
-                         int input_dim, 
-                         int output_dim)
+// void send_data_to_device(const double *X_local, 
+//                          const double *y_local, 
+//                          raw_cache &d_cache, 
+//                          int batch_size_node, 
+//                          int input_dim, 
+//                          int output_dim,
+//                          cudaStream_t mystream[])
+// {
+//     // cudaMemcpyAsync(d_cache.X, X_local, sizeof(double) * batch_size_node * input_dim, cudaMemcpyHostToDevice, mystream[3]);
+//     // cudaMemcpyAsync(d_cache.y, y_local, sizeof(double) * batch_size_node * output_dim, cudaMemcpyHostToDevice, mystream[2]);
+//     cudaMemcpy(d_cache.X, X_local, sizeof(double) * batch_size_node * input_dim, cudaMemcpyHostToDevice);
+//     cudaMemcpy(d_cache.y, y_local, sizeof(double) * batch_size_node * output_dim, cudaMemcpyHostToDevice);
+// }
+
+void send_data_to_device(const double *src, 
+    double *dest, 
+    int batch_size_node, 
+    int dim,
+    cudaStream_t stream)
 {
-    cudaMemcpy(d_cache.X, X_local, sizeof(double) * batch_size_node * input_dim, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_cache.y, y_local, sizeof(double) * batch_size_node * output_dim, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(dest, src, sizeof(double) * batch_size_node * dim, cudaMemcpyHostToDevice, stream);
+// cudaMemcpy(dest, X_local, sizeof(double) * batch_size_node * input_dim, cudaMemcpyHostToDevice);
+// cudaMemcpy(d_cache.y, y_local, sizeof(double) * batch_size_node * output_dim, cudaMemcpyHostToDevice);
 }
 
 
 // size is the number of images in this batch
-void forward_pass(raw_params &d_params, raw_cache &d_cache, int input_dim, int h1, int output_dim, int size)
+void forward_pass(raw_params &d_params, raw_cache &d_cache, int input_dim, int h1, int output_dim, int size, cudaStream_t mystream[])
 {
     double alpha = 1.0;
     double beta = 0.0;
-    myGEMM(d_params.W1, d_cache.X, d_cache.z1, &alpha, &beta, h1, size, input_dim);
-    add_col(d_cache.z1, d_params.b1, h1, size);
-    sigmoid(d_cache.z1, d_cache.a1, h1, size);
-    myGEMM(d_params.W2, d_cache.a1, d_cache.z2, &alpha, &beta, output_dim, size, h1);
-    add_col(d_cache.z2, d_params.b2, output_dim, size);
-    softmax(d_cache.z2, d_cache.yhat, output_dim, size);
+    myGEMM(d_params.W1, d_cache.X, d_cache.z1, &alpha, &beta, h1, size, input_dim, mystream[0]);
+    add_col(d_cache.z1, d_params.b1, h1, size, mystream[0]);
+    sigmoid(d_cache.z1, d_cache.a1, h1, size, mystream[0]);
+    myGEMM(d_params.W2, d_cache.a1, d_cache.z2, &alpha, &beta, output_dim, size, h1, mystream[0]);
+    add_col(d_cache.z2, d_params.b2, output_dim, size, mystream[0]);
+    softmax(d_cache.z2, d_cache.yhat, output_dim, size, mystream[0]);
 }
 
 void backward_pass(raw_params &d_params,
@@ -370,25 +400,34 @@ void backward_pass(raw_params &d_params,
                    double reg,
                    int size,
                    int batch_size,
-                   int num_procs)
+                   int num_procs,
+                   cudaStream_t mystream[])
 {
     double alpha = 1.0;
     double beta = 0.0;
-    matadd(d_cache.yhat, d_cache.y, d_bp.ydiff, output_dim, size, 1.0/(double)batch_size, -1.0/(double)batch_size);
-    transpose(d_cache.a1, d_bp.a1t, h1, size);
-    transpose(d_params.W2, d_bp.W2t, output_dim, h1);
-    transpose(d_cache.X, d_bp.Xt, input_dim, size);
-    myGEMM(d_bp.ydiff, d_bp.a1t, d_grad.dW2, &alpha, &beta, output_dim, h1, size);
-    naive_sum(d_bp.ydiff, d_grad.db2, output_dim, size);
+    cudaEvent_t event; 
+    cudaEventCreate (&event);
+
+    matadd(d_cache.yhat, d_cache.y, d_bp.ydiff, output_dim, size, 1.0/(double)batch_size, -1.0/(double)batch_size, mystream[0]);
+    transpose(d_cache.a1, d_bp.a1t, h1, size, mystream[1]);
+    transpose(d_params.W2, d_bp.W2t, output_dim, h1, mystream[2]);
+    transpose(d_cache.X, d_bp.Xt, input_dim, size, mystream[3]);
+    cudaStreamSynchronize(mystream[0]);
+    myGEMM(d_bp.ydiff, d_bp.a1t, d_grad.dW2, &alpha, &beta, output_dim, h1, size, mystream[1]);
+    matadd(d_grad.dW2, d_params.W2, d_grad.dW2, output_dim, h1, 1.0, reg/(double)num_procs, mystream[1]);
+
+    naive_sum(d_bp.ydiff, d_grad.db2, output_dim, size, mystream[3]);
     // compute partial w.r.t a1
-    myGEMM(d_bp.W2t, d_bp.ydiff, d_bp.dz1, &alpha, &beta, h1, size ,output_dim);
-    get_dz1(d_bp.dz1, d_cache.a1, h1, size);
-    myGEMM(d_bp.dz1, d_bp.Xt, d_grad.dW1, &alpha, &beta, h1, input_dim, size);
-    naive_sum(d_bp.dz1, d_grad.db1, h1, size);
+    myGEMM(d_bp.W2t, d_bp.ydiff, d_bp.dz1, &alpha, &beta, h1, size ,output_dim, mystream[0]);
+    get_dz1(d_bp.dz1, d_cache.a1, h1, size, mystream[0]);
+    cudaEventRecord(event, mystream[0]);
+    myGEMM(d_bp.dz1, d_bp.Xt, d_grad.dW1, &alpha, &beta, h1, input_dim, size, mystream[0]);
+
+    cudaStreamWaitEvent(mystream[2], event, 0);
+    naive_sum(d_bp.dz1, d_grad.db1, h1, size, mystream[2]);
 
     // Add regularization terms to the grads
-    matadd(d_grad.dW1, d_params.W1, d_grad.dW1, h1, input_dim, 1.0, reg/(double)num_procs);
-    matadd(d_grad.dW2, d_params.W2, d_grad.dW2, output_dim, h1, 1.0, reg/(double)num_procs);
+    matadd(d_grad.dW1, d_params.W1, d_grad.dW1, h1, input_dim, 1.0, reg/(double)num_procs, mystream[0]);
 }
 
 void gradient_descent(raw_grad &d_grad, 
@@ -396,12 +435,13 @@ void gradient_descent(raw_grad &d_grad,
                       double learning_rate,
                       int input_dim,
                       int h1,
-                      int output_dim)
+                      int output_dim,
+                      cudaStream_t mystream[])
 {
-    matadd(d_params.W1, d_grad.dW1, d_params.W1, h1, input_dim, 1.0, -learning_rate);
-    matadd(d_params.W2, d_grad.dW2, d_params.W2, output_dim, h1, 1.0, -learning_rate);
-    matadd(d_params.b1, d_grad.db1, d_params.b1, h1, 1, 1.0, -learning_rate);
-    matadd(d_params.b2, d_grad.db2, d_params.b2, output_dim, 1, 1.0, -learning_rate);
+    matadd(d_params.W1, d_grad.dW1, d_params.W1, h1, input_dim, 1.0, -learning_rate, mystream[0]);
+    matadd(d_params.W2, d_grad.dW2, d_params.W2, output_dim, h1, 1.0, -learning_rate, mystream[1]);
+    matadd(d_params.b1, d_grad.db1, d_params.b1, h1, 1, 1.0, -learning_rate, mystream[2]);
+    matadd(d_params.b2, d_grad.db2, d_params.b2, output_dim, 1, 1.0, -learning_rate, mystream[3]);
 }
 
 
